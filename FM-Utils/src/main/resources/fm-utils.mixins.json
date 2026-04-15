@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "package": "com.fordmc.fmutils.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+  ],
+  "client": [
+    "CameraMixin",
+    "GameRendererMixin",
+    "InGameHudMixin",
+    "KeyboardInputMixin",
+    "KeyboardMixin",
+    "MinecraftMixin",
+    "MouseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

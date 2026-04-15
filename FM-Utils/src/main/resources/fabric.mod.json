@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "fm-utils",
+  "version": "${version}",
+  "name": "FM Utils",
+  "description": "Auto Cinematic and AFK Utilities",
+  "authors": [
+    "FordMC"
+  ],
+  "contact": {
+    "homepage": "https://fabricmc.net/",
+    "sources": "https://github.com/FabricMC/fabric-example-mod"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.fordmc.fmutils.FMUtils"
+    ],
+    "client": [
+      "com.fordmc.fmutils.client.FMUtilsClient"
+    ]
+  },
+  "mixins": [
+    "fm-utils.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "~${minecraft_version}",
+    "java": ">=21",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "another-mod": "*"
+  }
+}
