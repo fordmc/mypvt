@@ -1,5 +1,8 @@
 package com.fordmc.fmutils.client;
 
+import com.fordmc.fmutils.client.cinematic.CinematicMath;
+import com.fordmc.fmutils.client.cinematic.ICinematicPreset;
+import com.fordmc.fmutils.client.cinematic.presets.*;
 import com.fordmc.fmutils.config.FMConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
@@ -63,21 +66,9 @@ public class CinematicManager {
         SoundEvents.MUSIC_DISC_STAL.value()
     );
 
-    private record ShotParameters(
-        double radiusBase,
-        double radiusFreq,
-        double radiusAmp,
-        double heightBase,
-        double heightFreq,
-        double heightAmp,
-        double yawSpeed,
-        double fovPulseFreq,
-        double fovPulseAmp,
-        double driftSpeed,
-        boolean followMode // true = orbit/follow, false = stationary/tracking
-    ) {}
-
-    private static ShotParameters currentShot = null;
+    private static ICinematicPreset currentShot = null;
+    private static ICinematicPreset previousShot = null;
+    private static long shotStartTime = 0L;
     private static boolean active = false;
     private static StartReason startReason = StartReason.MANUAL;
     private static long lastInputTime = System.currentTimeMillis();
@@ -90,6 +81,12 @@ public class CinematicManager {
     private static float currentFovModifier = 0f;
     private static int originalFpsLimit = 120;
     private static boolean changedFpsLimit = false;
+    private static double smoothedAvoidanceDistance = -1.0;
+    private static Vec3 smoothedPosition = null;
+    private static float smoothedYaw = 0f;
+    private static float smoothedPitch = 0f;
+    private static boolean firstFrame = true;
+    private static int lastArchetype = -1;
 
     public static void toggle() {
         if (active) {
@@ -167,7 +164,22 @@ public class CinematicManager {
             }
         }
 
+        // Music Playlist System: Auto-restart music if it stops during cinematic mode
+        if (active && FMConfig.get().playMusicDuringCinematic && cinematicMusicStarted) {
+            if (currentMusicInstance == null || !client.getSoundManager().isActive(currentMusicInstance)) {
+                playNextTrack(client);
+            }
+        }
+
         autoStoppedByKeyboardThisTick = false;
+    }
+
+    private static void playNextTrack(Minecraft client) {
+        if (FMConfig.get().cinematicMusicVolume <= 0.0f) return;
+        
+        net.minecraft.sounds.SoundEvent track = MUSIC_TRACKS.get(client.level.random.nextInt(MUSIC_TRACKS.size()));
+        currentMusicInstance = new CinematicMusicInstance(track);
+        client.getSoundManager().play(currentMusicInstance);
     }
 
     public static float getFovModifier() {
@@ -187,6 +199,7 @@ public class CinematicManager {
         LocalPlayer player = client.player;
         Vec3 target = player.getEyePosition(partialTick).add(0.0D, -0.25D, 0.0D);
         double elapsedSeconds = (System.currentTimeMillis() - startTime) / 1000.0D;
+        long now = System.currentTimeMillis();
         FMConfig config = FMConfig.get();
         double viewDuration = Math.max(4.0D, config.cameraViewDurationSeconds);
         int viewIndex = (int) (elapsedSeconds / viewDuration);
@@ -194,56 +207,57 @@ public class CinematicManager {
         
         if (viewIndex != lastCameraViewIndex || currentShot == null) {
             lastCameraViewIndex = viewIndex;
+            previousShot = currentShot;
+            shotStartTime = now;
             generateNewShot();
         }
         
-        // Procedural Parametric Engine
-        ShotParameters p = currentShot;
-        double speedScale = Math.max(0.03D, config.rotationSpeed) * 1.2D;
-        double t = elapsedSeconds;
-        double vt = viewTime;
-        
+        Vec3 posB = currentShot.getOffset(viewTime, viewDuration);
+        Vec3 finalPos = target.add(posB);
+
+        // Transition Blending
+        double transitionTime = (now - shotStartTime) / 1000.0D;
+        double blendDuration = 2.0D;
+        if (previousShot != null && transitionTime < blendDuration) {
+            double progress = smoothStep(transitionTime / blendDuration);
+            Vec3 posA = previousShot.getOffset(viewTime + viewDuration, viewDuration);
+            finalPos = target.add(posA.lerp(posB, progress));
+        }
+
         // FOV Pulse / Dynamic Zoom
         if (config.cinematicZoomAmount > 0) {
-            double zoomProgress = vt / viewDuration;
-            double baseZoom = zoomProgress * config.cinematicZoomAmount * -30.0D;
-            double pulse = Math.sin(vt * p.fovPulseFreq) * p.fovPulseAmp;
-            currentFovModifier = (float) (baseZoom + pulse);
+            currentFovModifier = currentShot.getFovModifier(viewTime, viewDuration) * config.cinematicZoomAmount;
         } else {
             currentFovModifier = 0f;
         }
-        
-        double currentRadius = p.radiusBase + Math.sin(t * p.radiusFreq) * p.radiusAmp;
-        double currentHeight = p.heightBase + Math.cos(t * p.heightFreq) * p.heightAmp;
 
-        if (config.autoAdjustCamera) {
-            double[] dirs = {0, 90, 180, 270};
-            double totalFree = 0;
-            for (double dir : dirs) {
-                Vec3 dVec = Vec3.directionFromRotation(0.0F, player.getViewYRot(partialTick) + (float)dir).normalize();
-                HitResult hr = client.level.clip(new ClipContext(target, target.add(dVec.scale(15.0D)), ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, player));
-                totalFree += hr.getType() == HitResult.Type.MISS ? 15.0D : hr.getLocation().distanceTo(target);
-            }
-            double avgRadius = totalFree / 4.0D;
-            currentRadius = Math.max(2.0D, Math.min(currentRadius, avgRadius * 0.8D));
-            currentHeight = Math.min(currentHeight, avgRadius * 0.3D);
-        }
-
-        Vec3 pos;
-        if (p.followMode) {
-            double currentYaw = t * p.yawSpeed * speedScale;
-            pos = target.add(Math.cos(currentYaw) * currentRadius, currentHeight, Math.sin(currentYaw) * currentRadius);
-        } else {
-            // Stationary dolly style
-            Vec3 forward = Vec3.directionFromRotation(0.0F, player.getViewYRot(partialTick)).normalize();
-            double slide = Math.sin(vt * p.yawSpeed) * currentRadius;
-            pos = target.add(forward.scale(-currentRadius)).add(new Vec3(-forward.z, 0, forward.x).scale(slide)).add(0, currentHeight, 0);
-        }
-
-        return calculateFinalPose(player, target, pos, config, elapsedSeconds);
+        return calculateFinalPose(player, target, finalPos, config, elapsedSeconds, partialTick);
     }
 
-    private static CameraPose calculateFinalPose(LocalPlayer player, Vec3 target, Vec3 pos, FMConfig config, double elapsedSeconds) {
+    private static void generateNewShot() {
+        java.util.Random r = new java.util.Random();
+        double distance = Math.max(3.0D, FMConfig.get().cameraDistance);
+        double heightGoal = FMConfig.get().cameraHeight;
+        long seed = r.nextLong();
+
+        int archetype = r.nextInt(7);
+        if (archetype == lastArchetype) {
+            archetype = (archetype + 1) % 7;
+        }
+        lastArchetype = archetype;
+
+        currentShot = switch (archetype) {
+            case 0 -> new OrbitPreset(seed, distance, heightGoal, 0.5);
+            case 1 -> new DriftPreset(seed, distance, heightGoal);
+            case 2 -> new ZoomPreset(seed, distance, heightGoal);
+            case 3 -> new SideShotPreset(seed, distance, heightGoal);
+            case 4 -> new TopDownPreset(seed, distance);
+            case 5 -> new EstablishingShotPreset(seed, distance, heightGoal);
+            default -> new OrbitPreset(seed, distance * 2.0, heightGoal + 4.0, 0.2); // Majestic Far Orbit
+        };
+    }
+
+    private static CameraPose calculateFinalPose(LocalPlayer player, Vec3 target, Vec3 pos, FMConfig config, double elapsedSeconds, float partialTick) {
         if (config.handheldCameraMode) {
             double shakeTime = elapsedSeconds * 2.5D;
             double intensity = 0.05D;
@@ -255,76 +269,41 @@ public class CinematicManager {
         }
 
         pos = avoidBlocks(player, target, pos);
-        return lookAt(pos, target);
-    }
 
-    private static void generateNewShot() {
-        java.util.Random r = new java.util.Random();
-        double distance = Math.max(3.0D, FMConfig.get().cameraDistance);
-        double heightGoal = FMConfig.get().cameraHeight;
+        // --- Path Smoothing (Position) ---
+        if (firstFrame || smoothedPosition == null || config.pathSmoothing <= 0) {
+            smoothedPosition = pos;
+        } else {
+            // Apply frame-rate independent position smoothing
+            float lerp = 1.0f - (float)Math.pow(1.0 - config.pathSmoothing, partialTick * 0.8);
+            smoothedPosition = smoothedPosition.lerp(pos, lerp);
+        }
+        pos = smoothedPosition;
 
-        // Archetype selection
-        int archetype = r.nextInt(4);
+        // --- Final Pose Calculation (Smoothing) ---
+        CameraPose targetPose = lookAt(pos, target);
+        float pitchFinal = targetPose.pitch();
+        float yawFinal = targetPose.yaw();
         
-        currentShot = switch (archetype) {
-            case 0 -> // ORBIT
-                new ShotParameters(
-                    distance * (0.8 + r.nextDouble() * 0.4),
-                    0.1 + r.nextDouble() * 0.5,
-                    r.nextDouble() * 1.5,
-                    0.8 + heightGoal + r.nextDouble() * 1.5,
-                    0.2 + r.nextDouble() * 0.4,
-                    r.nextDouble() * 1.0,
-                    (r.nextBoolean() ? 1 : -1) * (0.4 + r.nextDouble()),
-                    0.2 + r.nextDouble() * 0.4,
-                    r.nextDouble() * 5.0,
-                    0.05 + r.nextDouble() * 0.1,
-                    true
-                );
-            case 1 -> // DOLLEY / LOW SWEEP
-                new ShotParameters(
-                    distance * (0.5 + r.nextDouble() * 0.5),
-                    0.05 + r.nextDouble() * 0.2,
-                    1.0 + r.nextDouble() * 2.0,
-                    0.2 + heightGoal * 0.5,
-                    0.1,
-                    0.2,
-                    (r.nextBoolean() ? 1 : -1) * (0.2 + r.nextDouble() * 0.4),
-                    0.1,
-                    r.nextDouble() * 3.0,
-                    0.1 + r.nextDouble() * 0.2,
-                    false
-                );
-            case 2 -> // CRANE / SKY RIDER
-                new ShotParameters(
-                    distance * (1.2 + r.nextDouble() * 1.0),
-                    0.05 + r.nextDouble() * 0.1,
-                    0.5,
-                    4.0 + heightGoal + r.nextDouble() * 6.0,
-                    0.1 + r.nextDouble() * 0.2,
-                    2.0 + r.nextDouble() * 3.0,
-                    (r.nextBoolean() ? 1 : -1) * (0.1 + r.nextDouble() * 0.3),
-                    0.05,
-                    r.nextDouble() * 2.0,
-                    0.02,
-                    true
-                );
-            default -> // HERO / CLOSE-UP
-                new ShotParameters(
-                    Math.max(2.5, distance * 0.4),
-                    0.3 + r.nextDouble() * 0.6,
-                    0.2 + r.nextDouble() * 0.5,
-                    1.1 + heightGoal,
-                    0.5 + r.nextDouble() * 0.5,
-                    0.1 + r.nextDouble() * 0.3,
-                    (r.nextBoolean() ? 1 : -1) * (0.8 + r.nextDouble() * 0.7),
-                    0.4 + r.nextDouble() * 0.6,
-                    2.0 + r.nextDouble() * 8.0,
-                    0.05,
-                    true
-                );
-        };
+        if (firstFrame || config.lookAtSmoothing <= 0) {
+            smoothedYaw = yawFinal;
+            smoothedPitch = pitchFinal;
+            firstFrame = false;
+        } else {
+            // Frame-rate stable smoothing factor for look-at
+            float lerp = 1.0f - (float)Math.pow(1.0 - config.lookAtSmoothing, partialTick * 0.4);
+            
+            float yawDelta = (yawFinal - smoothedYaw) % 360.0f;
+            if (yawDelta < -180.0f) yawDelta += 360.0f;
+            if (yawDelta > 180.0f) yawDelta -= 360.0f;
+            
+            smoothedYaw += yawDelta * lerp;
+            smoothedPitch = Mth.lerp(lerp, smoothedPitch, pitchFinal);
+        }
+
+        return new CameraPose(pos, smoothedYaw, smoothedPitch);
     }
+
 
     private static void start(StartReason reason, String message) {
         if (active && startReason == reason) {
@@ -371,20 +350,62 @@ public class CinematicManager {
             return desiredPosition;
         }
 
-        HitResult hitResult = client.level.clip(new ClipContext(
-            target,
-            desiredPosition,
-            ClipContext.Block.VISUAL,
-            ClipContext.Fluid.NONE,
-            player
-        ));
+        double radius = 0.35D;
+        Vec3[] hullPoints = {
+            Vec3.ZERO,
+            new Vec3(radius, 0, 0), new Vec3(-radius, 0, 0),
+            new Vec3(0, radius, 0), new Vec3(0, -radius, 0),
+            new Vec3(0, 0, radius), new Vec3(0, 0, -radius)
+        };
 
-        if (hitResult.getType() == HitResult.Type.MISS) {
+        double minDistanceFound = desiredPosition.distanceTo(target);
+        boolean hitOccurred = false;
+
+        for (Vec3 offset : hullPoints) {
+            HitResult hit = client.level.clip(new ClipContext(
+                target.add(offset),
+                desiredPosition.add(offset),
+                ClipContext.Block.VISUAL,
+                ClipContext.Fluid.NONE,
+                player
+            ));
+
+            if (hit.getType() != HitResult.Type.MISS) {
+                double dist = hit.getLocation().distanceTo(target.add(offset));
+                if (dist < minDistanceFound) {
+                    minDistanceFound = dist;
+                    hitOccurred = true;
+                }
+            }
+        }
+
+        if (!hitOccurred) {
+            smoothedAvoidanceDistance = -1.0;
             return desiredPosition;
         }
 
-        Vec3 awayFromPlayer = hitResult.getLocation().subtract(target).normalize();
-        return hitResult.getLocation().subtract(awayFromPlayer.scale(CAMERA_WALL_PADDING));
+        // --- Smart Adjustment ---
+        // If the camera is pushed too close (< 1.5 blocks), try to move it UP
+        double safeDistance = Math.max(0.1D, minDistanceFound - 0.1D);
+        if (safeDistance < 1.5D) {
+            // Try to find a higher vantage point
+            Vec3 highTarget = target.add(0, 1.0, 0);
+            Vec3 highPos = desiredPosition.add(0, 1.5, 0);
+            HitResult highHit = client.level.clip(new ClipContext(highTarget, highPos, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, player));
+            if (highHit.getType() == HitResult.Type.MISS) {
+                desiredPosition = highPos;
+                safeDistance = highPos.distanceTo(target);
+            }
+        }
+
+        if (smoothedAvoidanceDistance < 0) {
+            smoothedAvoidanceDistance = safeDistance;
+        } else {
+            smoothedAvoidanceDistance = Mth.lerp(0.15, smoothedAvoidanceDistance, safeDistance);
+        }
+
+        Vec3 awayFromPlayer = desiredPosition.subtract(target).normalize();
+        return target.add(awayFromPlayer.scale(smoothedAvoidanceDistance));
     }
 
     private static void applyPresentation(Minecraft client) {

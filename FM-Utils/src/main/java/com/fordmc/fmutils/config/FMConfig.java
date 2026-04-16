@@ -14,7 +14,7 @@ public class FMConfig {
     private static final File CONFIG_FILE = new File(FabricLoader.getInstance().getConfigDir().toFile(), "fm-utils.json");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
-    public int configVersion = 5;
+    public int configVersion = 7;
     public boolean autoCinematicEnabled = true;
     public int afkTimeoutSeconds = 15;
     public float rotationSpeed = 0.12f;
@@ -33,6 +33,9 @@ public class FMConfig {
     public float cinematicMusicVolume = 0.5f;
     public boolean handheldCameraMode = true;
     public boolean cinematicBars = true;
+    public float lookAtSmoothing = 0.15f;
+    public float pathSmoothing = 0.1f;
+    public float cloudShotFrequency = 0.15f;
 
     private static FMConfig instance;
 
@@ -51,8 +54,8 @@ public class FMConfig {
                 JsonObject json = GSON.fromJson(reader, JsonObject.class);
                 instance = GSON.fromJson(json, FMConfig.class);
 
-                if (json == null || !json.has("configVersion") || json.get("configVersion").getAsInt() < 5) {
-                    migrateToVersion5();
+                if (json == null || !json.has("configVersion") || json.get("configVersion").getAsInt() < 7) {
+                    migrateToVersion7();
                     shouldSave = true;
                 }
             } catch (IOException | RuntimeException e) {
@@ -86,37 +89,23 @@ public class FMConfig {
         }
     }
 
-    private static void migrateToVersion5() {
+    private static void migrateToVersion7() {
         if (instance == null) {
             instance = new FMConfig();
         }
 
-        instance.configVersion = 5;
-        instance.afkTimeoutSeconds = 15;
-        instance.hideGuiDuringCinematic = true;
-        instance.playMusicDuringCinematic = true;
-        instance.cycleCameraViews = true;
+        instance.configVersion = 7;
+        instance.pathSmoothing = 0.1f;
         
-        if (instance.cinematicMusicVolume == 0.0f) {
-            instance.cinematicMusicVolume = 0.5f;
-        }
-        
-        instance.randomizeCinematics = true;
-        instance.cameraViewDurationSeconds = 6;
-        instance.cameraDistance = 5.5f;
-        instance.cameraHeight = 1.0f;
-        instance.autoAdjustCamera = false;
-        instance.cinematicZoomAmount = 0.3f;
-        instance.slowMotionScale = 0.6f;
-        instance.lockFps30 = true;
-        instance.handheldCameraMode = true;
-        instance.cinematicBars = true;
+        // Ensure version 6 migrations also happen if needed
+        if (instance.afkTimeoutSeconds == 0) instance.afkTimeoutSeconds = 15;
+        if (instance.cameraDistance == 0) instance.cameraDistance = 5.5f;
     }
 
     private static boolean validate() {
         boolean changed = false;
 
-        changed |= setConfigVersion(5);
+        changed |= setConfigVersion(6);
         changed |= setAfkTimeoutSeconds(clamp(instance.afkTimeoutSeconds, 5, 600));
         changed |= setRotationSpeed(clamp(instance.rotationSpeed, 0.03f, 0.6f));
         changed |= setCameraViewDurationSeconds(clamp(instance.cameraViewDurationSeconds, 4, 20));
@@ -126,6 +115,9 @@ public class FMConfig {
         
         instance.cinematicZoomAmount = clamp(instance.cinematicZoomAmount, 0.0f, 1.0f);
         instance.slowMotionScale = clamp(instance.slowMotionScale, 0.2f, 1.0f);
+        instance.lookAtSmoothing = clamp(instance.lookAtSmoothing, 0.0f, 1.0f);
+        instance.pathSmoothing = clamp(instance.pathSmoothing, 0.0f, 1.0f);
+        instance.cloudShotFrequency = clamp(instance.cloudShotFrequency, 0.0f, 1.0f);
 
         return changed;
     }
